@@ -88,7 +88,7 @@ def get_audio_duration(file_path):
         result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         return float(result.stdout.strip())
     except FileNotFoundError:
-        raise Exception("سيرفر Railway يفتقد لبرنامج FFmpeg. يرجى إضافة ملف Aptfile كما هو موضح في الشرح.")
+        raise Exception("لم يتم العثور على برنامج FFmpeg في السيرفر. تأكد من إضافة Dockerfile لتثبيته.")
 
 def split_audio(file_path, segment_time_seconds, output_dir="temp_audio"):
     if not os.path.exists(output_dir):
@@ -106,7 +106,7 @@ def split_audio(file_path, segment_time_seconds, output_dir="temp_audio"):
     try:
         subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except FileNotFoundError:
-        raise Exception("سيرفر Railway يفتقد لبرنامج FFmpeg. يرجى إضافة ملف Aptfile كما هو موضح في الشرح.")
+        raise Exception("لم يتم العثور على برنامج FFmpeg في السيرفر. تأكد من إضافة Dockerfile لتثبيته.")
     except subprocess.CalledProcessError as e:
         raise Exception(f"خطأ في القص: {e.stderr.decode('utf-8', errors='ignore')}")
         
