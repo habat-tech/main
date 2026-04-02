@@ -3,6 +3,17 @@ import subprocess
 import glob
 import math
 import asyncio
+import sys
+
+# --- حل مشكلة Pyrogram مع بايثون الحديث (3.14) ---
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+# ----------------------------------------
+
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from google.auth.transport.requests import Request
