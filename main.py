@@ -2,12 +2,9 @@ import os
 import subprocess
 import glob
 import math
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, filters, 
-    ContextTypes, ConversationHandler, CallbackQueryHandler
-)
-# تم التعديل هنا لاستخدام OAuth بدلاً من Service Account
+import asyncio
+from pyrogram import Client, filters
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -15,81 +12,62 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 # ==========================================
-# 1. إعدادات المتغيرات
+# 1. إعدادات المتغيرات (هام جداً)
 # ==========================================
 TELEGRAM_TOKEN = "8232774943:AAFtAKRmmCLxh1rEW0ySjmfj3gmUcaKOWUM"
-SERVICE_ACCOUNT_FILE = 'credentials.json'
 
-# نفس أيدي المجلد الخاص بك الذي نسخته
+# تم إضافة بياناتك هنا
+API_ID = 25655313
+API_HASH = "25150f5a364255db770788de50a7762c"
+
+# نفس أيدي المجلد الخاص بك
 DRIVE_FOLDER_ID = '1FeRxk_jWqJnURr8u8P-YhBI18CIf8-6_' 
-
-# حالات المحادثة (States) للبوت
-CHOOSING_METHOD, TYPING_VALUE = range(2)
 
 # ==========================================
 # 2. دوال جوجل درايف (بنظام OAuth2)
 # ==========================================
+SERVICE_ACCOUNT_FILE = 'credentials.json'
+
 def get_drive_service():
-    """تهيئة الاتصال بجوجل درايف باستخدام حسابك الشخصي"""
     SCOPES = ['https://www.googleapis.com/auth/drive.file']
     creds = None
-    
-    # 1. التحقق من وجود توكن محفوظ مسبقاً (عشان البوت ميطلبش تسجيل دخول كل شوية)
     if os.path.exists('token.json'):
         creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-        
-    # 2. لو مفيش توكن، أو التوكن انتهت صلاحيته
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            # سيقوم بفتح المتصفح ليطلب منك الموافقة لأول مرة فقط
             flow = InstalledAppFlow.from_client_secrets_file(SERVICE_ACCOUNT_FILE, SCOPES)
             creds = flow.run_local_server(port=0)
-        
-        # حفظ التوكن للمرات القادمة
         with open('token.json', 'w') as token:
             token.write(creds.to_json())
-            
     try:
         return build('drive', 'v3', credentials=creds)
     except Exception as e:
-        print(f"خطأ في بناء الخدمة: {e}")
         return None
 
 def upload_to_drive(file_path, file_name):
-    """رفع الملف لدرايف وإرجاع رابط التحميل أو رسالة الخطأ"""
     service = get_drive_service()
     if not service:
-        return False, "ملف credentials.json غير موجود أو فشل تسجيل الدخول."
-        
+        return False, "ملف credentials.json أو token.json غير موجود."
     try:
-        # إعداد بيانات الملف وتحديد المجلد الأب (Folder ID)
         file_metadata = {'name': file_name}
         if DRIVE_FOLDER_ID and DRIVE_FOLDER_ID != 'ضع_أيدي_المجلد_هنا':
             file_metadata['parents'] = [DRIVE_FOLDER_ID]
             
         media = MediaFileUpload(file_path, mimetype='audio/mpeg', resumable=True)
-        
         file = service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink').execute()
         file_id = file.get('id')
         
-        # إعطاء صلاحية القراءة لأي شخص معاه الرابط (اختياري لأن الملف في حسابك أصلاً)
-        service.permissions().create(
-            fileId=file_id,
-            body={'type': 'anyone', 'role': 'reader'}
-        ).execute()
-        
+        service.permissions().create(fileId=file_id, body={'type': 'anyone', 'role': 'reader'}).execute()
         return True, file.get('webViewLink')
     except Exception as e:
-        # إرجاع تفاصيل الخطأ القادم من جوجل لمعرفة السبب الحقيقي
         return False, str(e)
 
 # ==========================================
 # 3. دوال التعامل مع الصوت (FFmpeg & FFprobe)
 # ==========================================
 def get_audio_duration(file_path):
-    """حساب طول الملف الصوتي بالثواني باستخدام ffprobe"""
     command = [
         "ffprobe", "-v", "error", "-show_entries",
         "format=duration", "-of",
@@ -99,90 +77,103 @@ def get_audio_duration(file_path):
     return float(result.stdout.strip())
 
 def split_audio(file_path, segment_time_seconds, output_dir="temp_audio"):
-    """قص الملف الصوتي بناءً على وقت محدد بالثواني لكل جزء"""
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-        
-    # تنظيف المجلد
     for old_file in glob.glob(os.path.join(output_dir, "part_*.mp3")):
         try: os.remove(old_file)
         except: pass
 
     output_pattern = os.path.join(output_dir, "part_%03d.mp3")
-
     command = [
         "ffmpeg", "-y", "-i", file_path,
         "-f", "segment", "-segment_time", str(segment_time_seconds),
         output_pattern
     ]
-
-    try:
-        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except subprocess.CalledProcessError as e:
-        raise Exception(f"خطأ في القص: {e.stderr.decode('utf-8', errors='ignore')}")
-
+    subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return sorted(glob.glob(os.path.join(output_dir, "part_*.mp3")))
 
 # ==========================================
-# 4. دوال بوت التليجرام (المحادثة التفاعلية)
+# 4. بوت التليجرام (باستخدام Pyrogram)
 # ==========================================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("أهلاً بيك يا بطل! 🚀\nابعتلي أي ملف صوتي عشان نبدأ.")
-    return ConversationHandler.END
+app = Client(
+    "audio_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=TELEGRAM_TOKEN
+)
 
-async def receive_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """استلام الملف الصوتي وإظهار خيارات القص"""
-    audio_file = update.message.audio or update.message.voice or update.message.document
+# ذاكرة لتخزين بيانات كل مستخدم مؤقتاً
+user_data = {}
+
+@app.on_message(filters.command("start"))
+async def start(client, message):
+    await message.reply_text("أهلاً بيك يا بطل! 🚀\nابعتلي أي ملف صوتي عشان نبدأ (بدون حدود للحجم).")
+
+@app.on_message((filters.audio | filters.voice | filters.document) & filters.private)
+async def receive_audio(client, message):
+    file_id = None
+    original_name = "audio.mp3"
     
-    if not audio_file:
-        await update.message.reply_text("أرجوك ابعت ملف صوتي صالح.")
-        return ConversationHandler.END
+    if message.audio:
+        file_id = message.audio.file_id
+        original_name = message.audio.file_name or "audio.mp3"
+    elif message.voice:
+        file_id = message.voice.file_id
+        original_name = "voice.ogg"
+    elif message.document:
+        file_id = message.document.file_id
+        original_name = message.document.file_name or "document.mp3"
 
-    # حفظ بيانات الملف في الذاكرة المؤقتة للمستخدم
-    context.user_data['file_id'] = audio_file.file_id
-    context.user_data['file_name'] = getattr(audio_file, 'file_name', f"audio_{audio_file.file_id}.mp3")
+    user_data[message.from_user.id] = {
+        'file_id': file_id,
+        'file_name': original_name,
+        'step': 'CHOOSING_METHOD'
+    }
 
-    # أزرار الاختيار
-    keyboard = [
+    keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("⏱️ قص بالدقائق", callback_data='by_minutes')],
         [InlineKeyboardButton("✂️ قص بعدد الأجزاء", callback_data='by_parts')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text("استلمت الملف! تحب تقصه إزاي؟", reply_markup=reply_markup)
-    return CHOOSING_METHOD
+    ])
+    await message.reply_text("استلمت الملف! تحب تقصه إزاي؟", reply_markup=keyboard)
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالجة ضغطة الزر"""
-    query = update.callback_query
-    await query.answer()
+@app.on_callback_query()
+async def button_callback(client, callback_query):
+    user_id = callback_query.from_user.id
+    choice = callback_query.data
     
-    choice = query.data
-    context.user_data['split_method'] = choice
+    if user_id not in user_data:
+        await callback_query.answer("من فضلك ابعت الملف من جديد.", show_alert=True)
+        return
+        
+    user_data[user_id]['split_method'] = choice
+    user_data[user_id]['step'] = 'TYPING_VALUE'
     
     if choice == 'by_minutes':
-        await query.edit_message_text("اكتب عدد الدقائق لكل جزء (مثلاً: 5 يعنى هيقص كل 5 دقايق):")
+        text = "اكتب عدد الدقائق لكل جزء (مثلاً: 5 يعنى هيقص كل 5 دقايق):"
     else:
-        await query.edit_message_text("اكتب عدد الأجزاء اللي عاوز تقسم الملف ليها (مثلاً: 4 أجزاء متساوية):")
+        text = "اكتب عدد الأجزاء اللي عاوز تقسم الملف ليها (مثلاً: 4 أجزاء متساوية):"
         
-    return TYPING_VALUE
+    await callback_query.message.edit_text(text)
 
-async def process_split_and_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """استلام الرقم، تحميل الملف، قصه، ورفعه"""
-    user_input = update.message.text
+@app.on_message(filters.text & filters.private & ~filters.command("start"))
+async def process_split_and_upload(client, message):
+    user_id = message.from_user.id
     
+    if user_id not in user_data or user_data[user_id].get('step') != 'TYPING_VALUE':
+        return
+        
     try:
-        value = float(user_input)
+        value = float(message.text)
         if value <= 0: raise ValueError
     except ValueError:
-        await update.message.reply_text("أرجوك اكتب رقم صحيح أكبر من الصفر.")
-        return TYPING_VALUE
+        await message.reply_text("أرجوك اكتب رقم صحيح أكبر من الصفر.")
+        return
 
-    status_msg = await update.message.reply_text("📥 جاري تحميل الملف من تليجرام...")
+    status_msg = await message.reply_text("📥 جاري تحميل الملف من تليجرام (قد يستغرق وقتاً للملفات الكبيرة)...")
     
-    file_id = context.user_data['file_id']
-    original_name = context.user_data['file_name']
-    method = context.user_data['split_method']
+    file_id = user_data[user_id]['file_id']
+    original_name = user_data[user_id]['file_name']
+    method = user_data[user_id]['split_method']
     
     if not original_name.endswith(('.mp3', '.ogg', '.wav', '.m4a')):
         original_name += ".mp3"
@@ -191,20 +182,19 @@ async def process_split_and_upload(update: Update, context: ContextTypes.DEFAULT
     if not os.path.exists(temp_dir):
         os.makedirs(temp_dir)
         
-    temp_file_path = os.path.join(temp_dir, original_name)
+    # الحصول على المسار الكامل لتجنب حفظه في مسار افتراضي
+    temp_file_path = os.path.abspath(os.path.join(temp_dir, original_name))
     exported_parts = []
 
     try:
-        # 1. تحميل الملف من تليجرام
-        new_file = await context.bot.get_file(file_id)
-        await new_file.download_to_drive(temp_file_path)
+        # 1. التحميل (بفضل Pyrogram بنقدر نحمل لحد 2 جيجا!)
+        await client.download_media(file_id, file_name=temp_file_path)
 
-        # 2. حساب وقت الجزء الواحد (بالثواني)
+        # 2. حساب وقت الجزء الواحد
         if method == 'by_minutes':
             segment_time = value * 60
-        else: # by_parts
+        else:
             total_duration = get_audio_duration(temp_file_path)
-            # إضافة ثانية واحدة لمعالجة كسور FFmpeg وتجنب إنشاء ملف أخير صغير جداً
             segment_time = math.ceil(total_duration / value) + 1
 
         await status_msg.edit_text("✂️ جاري قص الصوت...")
@@ -220,13 +210,12 @@ async def process_split_and_upload(update: Update, context: ContextTypes.DEFAULT
         
         for idx, part_path in enumerate(exported_parts):
             part_name = f"Part_{idx+1}_{safe_name}"
-            # استلام حالة النجاح وتفاصيل الرابط أو الخطأ
             success, result = upload_to_drive(part_path, part_name)
             
             if success:
                 links_message += f"الجزء {idx+1}: {result}\n"
             else:
-                links_message += f"الجزء {idx+1}: فشل الرفع ❌\nالسبب المباشر: {result}\n\n"
+                links_message += f"الجزء {idx+1}: فشل الرفع ❌\nالسبب: {result}\n\n"
 
         await status_msg.edit_text(links_message)
 
@@ -242,35 +231,9 @@ async def process_split_and_upload(update: Update, context: ContextTypes.DEFAULT
             if os.path.exists(part):
                 try: os.remove(part)
                 except: pass
+        # مسح الذاكرة
+        user_data.pop(user_id, None)
 
-    # تنظيف الذاكرة المؤقتة وإنهاء المحادثة
-    context.user_data.clear()
-    return ConversationHandler.END
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """إلغاء العملية"""
-    await update.message.reply_text("تم إلغاء العملية. ابعت ملف جديد لو حابب.")
-    context.user_data.clear()
-    return ConversationHandler.END
-
-# ==========================================
-# 5. تشغيل البوت
-# ==========================================
 if __name__ == '__main__':
-    print("🤖 البوت يعمل الآن وجاهز لاستقبال الملفات...")
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    
-    # إعداد المحادثة التفاعلية
-    conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.AUDIO | filters.VOICE | filters.Document.AUDIO, receive_audio)],
-        states={
-            CHOOSING_METHOD: [CallbackQueryHandler(button_callback)],
-            TYPING_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_split_and_upload)]
-        },
-        fallbacks=[CommandHandler("cancel", cancel)]
-    )
-    
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(conv_handler)
-    
-    app.run_polling()
+    print("🤖 البوت يعمل الآن (بنظام Pyrogram الاحترافي) وجاهز لاستقبال الملفات الضخمة...")
+    app.run()
