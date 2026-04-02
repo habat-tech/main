@@ -84,8 +84,11 @@ def get_audio_duration(file_path):
         "format=duration", "-of",
         "default=noprint_wrappers=1:nokey=1", file_path
     ]
-    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    return float(result.stdout.strip())
+    try:
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        return float(result.stdout.strip())
+    except FileNotFoundError:
+        raise Exception("سيرفر Railway يفتقد لبرنامج FFmpeg. يرجى إضافة ملف Aptfile كما هو موضح في الشرح.")
 
 def split_audio(file_path, segment_time_seconds, output_dir="temp_audio"):
     if not os.path.exists(output_dir):
@@ -100,7 +103,13 @@ def split_audio(file_path, segment_time_seconds, output_dir="temp_audio"):
         "-f", "segment", "-segment_time", str(segment_time_seconds),
         output_pattern
     ]
-    subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except FileNotFoundError:
+        raise Exception("سيرفر Railway يفتقد لبرنامج FFmpeg. يرجى إضافة ملف Aptfile كما هو موضح في الشرح.")
+    except subprocess.CalledProcessError as e:
+        raise Exception(f"خطأ في القص: {e.stderr.decode('utf-8', errors='ignore')}")
+        
     return sorted(glob.glob(os.path.join(output_dir, "part_*.mp3")))
 
 # ==========================================
@@ -124,13 +133,16 @@ async def start(client, message):
 async def receive_audio(client, message):
     file_id = None
     original_name = "audio.mp3"
+    duration = 0
     
     if message.audio:
         file_id = message.audio.file_id
         original_name = message.audio.file_name or "audio.mp3"
+        duration = message.audio.duration or 0
     elif message.voice:
         file_id = message.voice.file_id
         original_name = "voice.ogg"
+        duration = message.voice.duration or 0
     elif message.document:
         file_id = message.document.file_id
         original_name = message.document.file_name or "document.mp3"
@@ -138,6 +150,7 @@ async def receive_audio(client, message):
     user_data[message.from_user.id] = {
         'file_id': file_id,
         'file_name': original_name,
+        'duration': duration,  # تم إضافة تخزين مدة الصوت هنا
         'step': 'CHOOSING_METHOD'
     }
 
@@ -205,7 +218,10 @@ async def process_split_and_upload(client, message):
         if method == 'by_minutes':
             segment_time = value * 60
         else:
-            total_duration = get_audio_duration(temp_file_path)
+            # محاولة جلب المدة من تليجرام أولاً لتجنب استخدام ffprobe
+            total_duration = user_data[user_id].get('duration', 0)
+            if not total_duration:
+                total_duration = get_audio_duration(temp_file_path)
             segment_time = math.ceil(total_duration / value) + 1
 
         await status_msg.edit_text("✂️ جاري قص الصوت...")
